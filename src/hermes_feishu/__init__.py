@@ -157,24 +157,42 @@ async def handle(event_type: str, context: object = None) -> None:
 
 
 def _auto_deploy_hook() -> None:
-    """Write feishu-card-wrapper gateway hook files to ~/.hermes/hooks/.
+    """Write feishu-card-wrapper gateway hook to all existing Hermes hooks dirs.
 
-    Called during plugin register(). Ensures every machine that installs
-    this plugin also gets the gateway hook for card-wrapping auto-replies.
-    Already-existing files are overwritten to keep them in sync.
+    Deploys to:
+    1. Global hooks dir (~/.hermes/hooks/)
+    2. Every existing profile's hooks dir (~/.hermes/profiles/<name>/hooks/)
+
+    Called during plugin register(). Ensures every profile gateway on every
+    machine gets the card-wrapping hook. Existing files are overwritten to
+    keep them in sync.
     """
-    hook_dir = Path.home() / ".hermes" / "hooks" / "feishu-card-wrapper"
-    hook_dir.mkdir(parents=True, exist_ok=True)
+    hermes_home = Path.home() / ".hermes"
 
-    # Write HOOK.yaml
-    hook_yaml_path = hook_dir / "HOOK.yaml"
-    hook_yaml_path.write_text(HOOK_YAML, encoding="utf-8")
+    # Collect hook targets: global + all profiles
+    targets = [hermes_home / "hooks"]
+    profiles_dir = hermes_home / "profiles"
+    if profiles_dir.is_dir():
+        for profile_dir in sorted(profiles_dir.iterdir()):
+            if profile_dir.is_dir():
+                targets.append(profile_dir / "hooks")
 
-    # Write handler.py
-    handler_py_path = hook_dir / "handler.py"
-    handler_py_path.write_text(HANDLER_PY.format(version=__version__), encoding="utf-8")
+    deployed = []
+    for hook_parent in targets:
+        hook_dir = hook_parent / "feishu-card-wrapper"
+        try:
+            hook_dir.mkdir(parents=True, exist_ok=True)
+            (hook_dir / "HOOK.yaml").write_text(HOOK_YAML, encoding="utf-8")
+            (hook_dir / "handler.py").write_text(
+                HANDLER_PY.format(version=__version__), encoding="utf-8"
+            )
+            deployed.append(str(hook_dir))
+        except OSError as exc:
+            logger.warning(
+                "[hermes-feishu] Failed to deploy hook to %s: %s", hook_dir, exc,
+            )
 
     logger.info(
-        "[hermes-feishu] Auto-deployed hook feishu-card-wrapper → %s (v%s)",
-        hook_dir, __version__,
+        "[hermes-feishu] Auto-deployed hook feishu-card-wrapper to %d dir(s) (v%s)",
+        len(deployed), __version__,
     )
