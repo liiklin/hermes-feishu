@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List
 
 from .card_builder import build_mixed_card, build_table_card
@@ -120,6 +121,57 @@ def send_feishu_card(args: dict, **kwargs) -> str:
         }
         logger.error(f"No chat_id resolved: {error_msg}")
         return json.dumps(error_msg, ensure_ascii=False)
+
+    # Strip blockquote markers — Feishu card markdown doesn't support >
+    # Wrap consecutive quoted lines in code blocks for visual separation
+    lines = content.split("\n")
+    result: List[str] = []
+    in_block = False
+    for line in lines:
+        m = re.match(r"^>\s?(.*)", line)
+        if m:
+            if not in_block:
+                result.append("```")
+                in_block = True
+            result.append(m.group(1))
+        else:
+            if in_block:
+                result.append("```")
+                in_block = False
+            result.append(line)
+    content = "\n".join(result).strip()
+
+    H1_EMOJI = "📌"
+    HEADING_EMOJI = {1: "📌", 2: "📍", 3: "🔹", 4: "🔸", 5: "▫️", 6: "▪️"}
+    if not title:
+        h1_match = re.search(r"^#\s+(.+)", content, re.MULTILINE)
+        if h1_match:
+            title = f"{H1_EMOJI} {h1_match.group(1).strip()}"
+    # All headings (H1-H6) → emoji + bold in body
+    content = re.sub(
+        r"^(#)\s+(.+)",  # H1
+        lambda m: f"**{HEADING_EMOJI[1]} {m.group(2)}**",
+        content,
+        flags=re.MULTILINE,
+    )
+    content = re.sub(
+        r"^(##)(?!#)\s+(.+)",  # H2 (exact, not ###)
+        lambda m: f"**{HEADING_EMOJI[2]} {m.group(2)}**",
+        content,
+        flags=re.MULTILINE,
+    )
+    content = re.sub(
+        r"^(###)(?!#)\s+(.+)",  # H3
+        lambda m: f"**{HEADING_EMOJI[3]} {m.group(2)}**",
+        content,
+        flags=re.MULTILINE,
+    )
+    content = re.sub(
+        r"^(#{4,6})\s+(.+)",  # H4-H6
+        lambda m: f"**{HEADING_EMOJI.get(len(m.group(1)), '📌')} {m.group(2)}**",
+        content,
+        flags=re.MULTILINE,
+    ).strip()
 
     # Check for tables in content
     from .table_parser import parse_table, contains_table

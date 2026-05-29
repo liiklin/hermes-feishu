@@ -85,13 +85,47 @@ def _is_complex_markdown(text: str) -> bool:
         r"^```",               # code block
         r"^-\s+",              # unordered list
         r"^\d+\.\s+",          # ordered list
-        r"^>.+",               # blockquote
+        # NOTE: blockquote (^>.+) intentionally omitted — Feishu post with
+        # lark_md tag already renders > blockquotes correctly; the card
+        # markdown tag does not support them.
     ]
     for p in patterns:
         if re.search(p, text, re.MULTILINE):
             return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Blockquote handling — Feishu card markdown doesn't support >
+# ---------------------------------------------------------------------------
+
+
+def _strip_blockquotes(text: str) -> str:
+    """Wrap consecutive blockquote lines in fenced code blocks.
+
+    Feishu card's ``markdown`` tag does not render ``>`` blockquotes.
+    Wrapping consecutive quoted lines in ```...``` gives them a visible
+    gray-background block that visually separates quoted content.
+    """
+    lines = text.split("\n")
+    result: list[str] = []
+    in_block = False
+    for line in lines:
+        m = re.match(r"^>\s?(.*)", line)
+        if m:
+            if not in_block:
+                result.append("```")
+                in_block = True
+            result.append(m.group(1))
+        else:
+            if in_block:
+                result.append("```")
+                in_block = False
+            result.append(line)
+    if in_block:
+        result.append("```")
+    return "\n".join(result)
 
 
 # ---------------------------------------------------------------------------
@@ -131,24 +165,43 @@ def _build_card_payload(self: object, content: str) -> tuple:
         main_content, footer_text = content.rsplit(sep, 1)
         footer_text = footer_text.strip()
 
-    # 1. Extract first ``## Title`` as card header title
+    # 1. Extract first heading as card header title
+    H1_EMOJI = "📌"
+    HEADING_EMOJI = {1: "📌", 2: "📍", 3: "🔹", 4: "🔸", 5: "▫️", 6: "▪️"}
     title: Optional[str] = None
-    h2_match = re.search(r"^##\s+(.+)", main_content, re.MULTILINE)
-    if h2_match:
-        title = h2_match.group(1).strip()
-        main_content = re.sub(
-            r"^##\s+.+\n?", "", main_content, count=1, flags=re.MULTILINE
-        ).strip()
-
-    # 2. Convert ``###`` … ``######`` headings → **bold** text
+    h1_match = re.search(r"^#\s+(.+)", main_content, re.MULTILINE)
+    if h1_match:
+        title = f"{H1_EMOJI} {h1_match.group(1).strip()}"
+    # All headings (H1-H6) → emoji + bold in body
     main_content = re.sub(
-        r"^#{3,6}\s+(.+)\n?",
-        r"**\1**\n",
+        r"^(#)\s+(.+)",  # H1
+        lambda m: f"**{HEADING_EMOJI[1]} {m.group(2)}**",
+        main_content,
+        flags=re.MULTILINE,
+    )
+    main_content = re.sub(
+        r"^(##)(?!#)\s+(.+)",  # H2 (exact, not ###)
+        lambda m: f"**{HEADING_EMOJI[2]} {m.group(2)}**",
+        main_content,
+        flags=re.MULTILINE,
+    )
+    main_content = re.sub(
+        r"^(###)(?!#)\s+(.+)",  # H3
+        lambda m: f"**{HEADING_EMOJI[3]} {m.group(2)}**",
+        main_content,
+        flags=re.MULTILINE,
+    )
+    main_content = re.sub(
+        r"^(#{4,6})\s+(.+)",  # H4-H6
+        lambda m: f"**{HEADING_EMOJI.get(len(m.group(1)), '📌')} {m.group(2)}**",
         main_content,
         flags=re.MULTILINE,
     ).strip()
 
-    # 3. Build card (table-aware when possible)
+    # 3. Strip blockquotes — Feishu card markdown doesn't support >
+    main_content = _strip_blockquotes(main_content)
+
+    # 4. Build card (table-aware when possible)
     card = _build_card_via_plugin(main_content, title=title)
     if card is None:
         card = _build_simple_card(main_content, title=title)
