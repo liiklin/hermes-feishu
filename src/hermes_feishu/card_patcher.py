@@ -14,19 +14,27 @@ import logging
 import os
 import re
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("hermes_feishu.card_patcher")
 
 _PATCHED = False
+_original_build_outbound_payload: Optional[Callable] = None
+
+
+# ---------------------------------------------------------------------------
+# Gateway patcher
+# ---------------------------------------------------------------------------
 
 
 def patch_gateway() -> None:
     """Monkey-patch FeishuAdapter._build_outbound_payload in the gateway process.
 
     Call this from a ``gateway:startup`` hook handler.  Idempotent.
+    Saves the original method so short/simple messages can fall through
+    as plain post messages instead of getting card-wrapped.
     """
-    global _PATCHED
+    global _PATCHED, _original_build_outbound_payload
     if _PATCHED:
         return
     try:
@@ -37,13 +45,14 @@ def patch_gateway() -> None:
 
         from gateway.platforms.feishu import FeishuAdapter  # type: ignore[import-untyped]
 
-        original = FeishuAdapter._build_outbound_payload
+        _original_build_outbound_payload = FeishuAdapter._build_outbound_payload
         FeishuAdapter._build_outbound_payload = _build_card_payload
 
         _PATCHED = True
         print(
             f"[hermes-feishu] Patched FeishuAdapter._build_outbound_payload "
-            f"→ card wrapper (was {original.__module__}.{original.__qualname__})",
+            f"→ card wrapper (was {_original_build_outbound_payload.__module__}."
+            f"{_original_build_outbound_payload.__qualname__})",
             flush=True,
         )
     except Exception as exc:
@@ -54,21 +63,66 @@ def patch_gateway() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Heuristic: is this content worth wrapping in a card?
+# ---------------------------------------------------------------------------
+
+
+def _is_complex_markdown(text: str) -> bool:
+    """Return True when ``text`` has formatting that needs a card (not just a post).
+
+    Short status messages (tool progress, simple confirmations) pass through
+    as plain text.  Only wrap when there's actual rich content.
+    """
+    # Very short messages are tool status / intermediate updates — skip
+    if len(text) < 80:
+        return False
+
+    # Check for complex markdown patterns
+    patterns = [
+        r"^##\s+",             # H2 heading (would become card header)
+        r"^#{3,6}\s+",         # H3–H6 (would become bold)
+        r"^\|.+\|$",           # table row
+        r"^```",               # code block
+        r"^-\s+",              # unordered list
+        r"^\d+\.\s+",          # ordered list
+        r"^>.+",               # blockquote
+    ]
+    for p in patterns:
+        if re.search(p, text, re.MULTILINE):
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Card building
 # ---------------------------------------------------------------------------
 
 
 def _build_card_payload(self: object, content: str) -> tuple:
-    """Patched ``_build_outbound_payload`` — structured card with header/table support.
+    """Patched ``_build_outbound_payload`` — card wrapping with smart fallback.
+
+    Short or simple-content outbound messages are forwarded to the original
+    ``_build_outbound_payload`` so tool-status updates stay lean.  Only
+    messages with complex markdown (headings, tables, code blocks, lists) are
+    wrapped in interactive cards.
 
     Args:
-        self: FeishuAdapter instance (unused, for method-signature compat).
+        self: FeishuAdapter instance (for compatibility).
         content: The message text (may include footer after ``───``).
 
     Returns:
-        Tuple of (``"interactive"``, ``card_json_string``).
+        Tuple of ``(type, payload_string)``.
     """
 
+    # ── Smart fallback ───────────────────────────────────────────────────
+    # Short/simple messages → original post (no card, no clutter)
+    if _original_build_outbound_payload and not _is_complex_markdown(content):
+        # Strip any footer that transform_llm_output appended
+        clean = re.sub(r"\n───\n.*", "", content, flags=re.DOTALL).strip()
+        return _original_build_outbound_payload(self, clean)
+
+    # ── Card wrapping ────────────────────────────────────────────────────
     # Separate main content from footer
     footer_text = ""
     main_content = content
@@ -77,7 +131,6 @@ def _build_card_payload(self: object, content: str) -> tuple:
         main_content, footer_text = content.rsplit(sep, 1)
         footer_text = footer_text.strip()
 
-    # ── Heading processing ──────────────────────────────────────────────
     # 1. Extract first ``## Title`` as card header title
     title: Optional[str] = None
     h2_match = re.search(r"^##\s+(.+)", main_content, re.MULTILINE)
@@ -95,13 +148,12 @@ def _build_card_payload(self: object, content: str) -> tuple:
         flags=re.MULTILINE,
     ).strip()
 
-    # ── Build card ──────────────────────────────────────────────────────
-    # Try plugin's own card_builder first (handles tables), fallback to simple
+    # 3. Build card (table-aware when possible)
     card = _build_card_via_plugin(main_content, title=title)
     if card is None:
         card = _build_simple_card(main_content, title=title)
 
-    # ── Append footer ───────────────────────────────────────────────────
+    # 4. Append footer
     if footer_text:
         card.setdefault("elements", []).append({
             "tag": "markdown",
