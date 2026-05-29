@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Session context helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_session_chat_id() -> str:
     """Get chat_id from Hermes session context.
 
@@ -70,11 +71,16 @@ def _resolve_chat_id(args: dict, **kwargs) -> str:
         or _get_session_chat_id()
         or os.environ.get("HERMES_FEISHU_CHAT_ID", "")
     )
-    
+
     if not chat_id:
         logger.error("No chat_id available from any source (args, kwargs, session, or default)")
-    
+
     return chat_id
+
+
+# ---------------------------------------------------------------------------
+# Tool handlers
+# ---------------------------------------------------------------------------
 
 
 def send_feishu_card(args: dict, **kwargs) -> str:

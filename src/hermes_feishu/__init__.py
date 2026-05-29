@@ -1,20 +1,39 @@
 """Hermes Feishu Plugin - Enhanced Feishu messaging with card messages and table rendering.
 
 This plugin enhances Hermes Agent's Feishu messaging capabilities by providing:
-- send_feishu_card: Send rich card messages with table support
-- send_feishu_table: Send structured tables as card messages
-- pre_llm_call hook: Auto-inject formatting instructions for Feishu platform
+
+- send_feishu_card: Send rich card messages with table support (no footer)
+- send_feishu_table: Send structured tables as card messages (no footer)
+- post_api_request hook: Capture model/usage/duration for card footer
+- transform_llm_output hook: Appends footer text ONLY to the final assistant response
+- Auto-deploys a gateway:startup hook that wraps all outbound Feishu text in
+  interactive cards for proper Markdown rendering (headings, tables, code blocks).
+
+Thus:
+  ✅ Final text response → text has footer (transform_llm_output) → wrapped in card → card+footer
+  ✅ Intermediate messages → plain text → wrapped in card → card no footer
+  ✅ Tool-sent cards (send_feishu_card/table) → direct Lark SDK call → card no footer
 """
 
+from __future__ import annotations
+
 import logging
+import os
+from pathlib import Path
 
 from .schemas import SEND_FEISHU_CARD_SCHEMA, SEND_FEISHU_TABLE_SCHEMA
 from .sender import _has_credentials
+from . import stats
 from .tools import send_feishu_card, send_feishu_table
 
-__version__ = "0.3.6"
+__version__ = "0.5.0"
 
 logger = logging.getLogger("hermes-feishu")
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
 
 
 def register(ctx):
@@ -40,92 +59,119 @@ def register(ctx):
         check_fn=_has_credentials,
     )
 
-    # Register pre_llm_call hook for Feishu context injection
-    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    # Register post_api_request hook to capture model/usage/duration for footer.
+    ctx.register_hook("post_api_request", _on_post_api_request)
 
+    # Register transform_llm_output hook to append footer text to the FINAL
+    # assistant response only.
+    ctx.register_hook("transform_llm_output", _on_transform_llm_output)
 
-def _on_pre_llm_call(
-    session_id: str = "",
-    user_message: str = "",
-    conversation_history=None,
-    is_first_turn: bool = False,
+    # Auto-deploy gateway startup hook so Feishu auto-replies get card wrapping.
+    _auto_deploy_hook()
+
+def _on_post_api_request(
+    *,
     model: str = "",
-    platform: str = "",
-    chat_id: str = "",
-    sender_id: str = "",
-    **kwargs,
-):
-    """Inject Feishu formatting instructions when platform is Feishu.
+    provider: str = "",
+    base_url: str = "",
+    usage: object = None,
+    api_duration: float = 0.0,
+    api_call_count: int = 0,
+    **_: object,
+) -> None:
+    """Capture latest API call stats for the footer."""
+    stats.update(
+        model=model,
+        provider=provider,
+        usage=usage,
+        api_duration=api_duration,
+        base_url=base_url,
+    )
 
-    Injects on every turn to ensure LLM remembers to use card tools.
-    Uses full instructions on first turn, brief reminder on subsequent turns.
-    Also provides the current chat_id so LLM can call tools without guessing.
+    if api_call_count <= 1:
+        footer = stats.build_footer()
+        if footer:
+            logger.info("[hermes-feishu] Captured API stats: %s", footer)
+        else:
+            logger.info(
+                "[hermes-feishu] post_api_request: model=%s, provider=%s, usage=%s, duration=%.2fs",
+                model, provider, usage, api_duration,
+            )
 
-    Args:
-        session_id: Current session ID.
-        user_message: The user's message.
-        conversation_history: Conversation history.
-        is_first_turn: Whether this is the first turn.
-        model: Model name.
-        platform: Platform identifier (e.g., 'feishu').
-        chat_id: Current chat/channel ID.
-        sender_id: Sender user ID.
 
-    Returns:
-        Context dict to inject, or None.
-    """
-    # Normalize platform name (case-insensitive check)
-    if not platform or platform.lower() not in ("feishu", "lark"):
+def _on_transform_llm_output(**kwargs: object) -> str | None:
+    """Append footer text to the FINAL assistant response."""
+    response_text = kwargs.get("response_text", "")
+    if not response_text or not isinstance(response_text, str):
         return None
 
-    # Store chat_id in os.environ for tools to access
-    # (contextvars don't propagate across thread pool boundary)
-    import os
-    if chat_id:
-        os.environ["HERMES_SESSION_CHAT_ID"] = chat_id
+    footer_line = stats.build_footer()
+    if not footer_line:
+        return None
 
-    # Log hook activation for debugging
+    return f"{response_text}\n\n───\n{footer_line}"
+
+
+# ---------------------------------------------------------------------------
+# Auto-deploy gateway hook
+# ---------------------------------------------------------------------------
+
+
+HOOK_YAML = """\
+name: feishu-card-wrapper
+description: >-
+  Wraps all Feishu text outbound messages in interactive cards for proper
+  Markdown rendering. Auto-deployed by hermes-feishu plugin.
+events:
+  - gateway:startup
+"""
+
+HANDLER_PY = '''\
+"""Handle gateway:startup — monkey-patch FeishuAdapter for card wrapping.
+
+Auto-deployed by hermes-feishu plugin v{version}. Do not edit manually.
+Update by running: hermes plugins upgrade <your-repo>/hermes-feishu
+"""
+
+import os
+import sys
+
+
+async def handle(event_type: str, context: object = None) -> None:
+    """On gateway:startup, patch FeishuAdapter for card wrapping."""
+    if event_type != "gateway:startup":
+        return
+
+    # Ensure plugin source is on sys.path (gateway process doesn\'t load plugins)
+    hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+    plugin_src = os.path.join(hermes_home, "plugins", "hermes-feishu", "src")
+    if plugin_src not in sys.path:
+        sys.path.insert(0, plugin_src)
+
+    from hermes_feishu.card_patcher import patch_gateway
+
+    patch_gateway()'''
+
+
+def _auto_deploy_hook() -> None:
+    """Write feishu-card-wrapper gateway hook files to ~/.hermes/hooks/.
+
+    Called during plugin register(). Ensures every machine that installs
+    this plugin also gets the gateway hook for card-wrapping auto-replies.
+    Already-existing files are overwritten to keep them in sync.
+    """
+    hook_dir = Path.home() / ".hermes" / "hooks" / "feishu-card-wrapper"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write HOOK.yaml
+    hook_yaml_path = hook_dir / "HOOK.yaml"
+    hook_yaml_path.write_text(HOOK_YAML, encoding="utf-8")
+
+    # Write handler.py
+    handler_py_path = hook_dir / "handler.py"
+    handler_py_path.write_text(HANDLER_PY.format(version=__version__), encoding="utf-8")
+
     logger.info(
-        f"[hermes-feishu] pre_llm_call hook: platform={platform}, chat_id={chat_id or '(empty)'}, session_id={session_id}, sender_id={sender_id or '(empty)'}"
+        "[hermes-feishu] Auto-deployed hook feishu-card-wrapper → %s (v%s)",
+        hook_dir, __version__,
     )
-    # Debug: print all kwargs to see what Hermes passes
-    if kwargs:
-        logger.info(f"[hermes-feishu] pre_llm_call kwargs keys: {list(kwargs.keys())}, values: {kwargs}")
-    else:
-        logger.info("[hermes-feishu] pre_llm_call kwargs is empty")
-
-    # Hermes doesn't pass chat_id and contextvars don't propagate to thread pool.
-    # Extract chat_id from session_id format: "agent:main:feishu:dm:oc_xxx"
-    if not chat_id and session_id:
-        # session_id format: "agent:main:<platform>:<chat_type>:<chat_id>[:thread_id]"
-        # or "agent:main:<platform>:<chat_type>" (if chat_id missing)
-        parts = session_id.split(":")
-        if len(parts) >= 5:
-            # chat_id is at index 4 (after agent:main:platform:chat_type)
-            potential_chat_id = parts[4]
-            if potential_chat_id.startswith(("oc_", "ou_", "gc_")):  # Feishu chat ID prefixes
-                chat_id = potential_chat_id
-                logger.info(f"[hermes-feishu] Extracted chat_id from session_id: {chat_id}")
-
-    # Build context with chat_id - inject on EVERY turn to ensure LLM remembers
-    context = (
-        "\n\n[System: Feishu Platform Instructions]\n"
-        "You are connected via Feishu (飞书). Feishu messages have limited Markdown support:\n"
-        "- ✅ Supported: bold, italic, lists, code blocks, headers\n"
-        "- ❌ NOT supported: Markdown tables\n\n"
-        "**IMPORTANT**: When your response contains tabular data:\n"
-        "1. Use `send_feishu_card` or `send_feishu_table` tool to render tables\n"
-        "2. Do NOT include Markdown table syntax in your regular text response\n"
-        "3. You can still use other Markdown formatting in normal messages\n\n"
-        "**Reaction Feature**: Messages sent via tools will automatically get a DONE (✅) reaction.\n"
-        "This indicates successful completion. No need to specify reaction parameter.\n"
-    )
-    
-    if chat_id:
-        context += f"\n**Current chat_id**: `{chat_id}`\n"
-        logger.info(f"[hermes-feishu] Injected chat_id into context: {chat_id}")
-    
-    # Log injection for debugging
-    logger.debug(f"[hermes-feishu] Injecting context (length={len(context)} chars)")
-    
-    return {"context": context}
