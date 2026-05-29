@@ -26,7 +26,7 @@ from .sender import _has_credentials
 from . import stats
 from .tools import send_feishu_card, send_feishu_table
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 logger = logging.getLogger("hermes-feishu")
 

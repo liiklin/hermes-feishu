@@ -10,9 +10,11 @@ Hermes Agent 内置的飞书通道使用 `post` 消息类型 + `tag: "md"` 发�
 
 本插件通过以下方式解决：
 
-1. **`send_feishu_card` 工具** — 发送包含表格的飞书卡片消息。自动检测 Markdown 中的表格语法，转换为飞书卡片 Table 组件。
+1. **`send_feishu_card` 工具** — 发送富文本卡片消息。自动检测 Markdown 中的表格语法，转换为飞书卡片 Table 组件。同样处理标题（`#`→emoji+加粗）和块引用（`>`→代码块包裹）。
 2. **`send_feishu_table` 工具** — 直接发送结构化表格数据（headers + rows）。
-3. **`pre_llm_call` 钩子** — 当平台为飞书时，自动注入格式化指令，引导 LLM 使用卡片工具发送表格。
+3. **`post_api_request` 钩子** — 捕获每次 API 调用的 model/usage/duration，供底部状态栏使用。
+4. **`transform_llm_output` 钩子** — 在最终 LLM 回复末尾追加模型/耗时状态栏。
+5. **Gateway 自动卡片包装** — 插件自动部署一个 `gateway:startup` 钩子（`feishu-card-wrapper`），将所有飞书出站文本消息通过 `card_patcher.py` 包装为交互式卡片，解决飞书 Post 不支持标题和表格的问题。
 
 ## 快速安装
 
@@ -46,12 +48,23 @@ FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
 
 #### 关于 HERMES_FEISHU_CHAT_ID
 
-Hermes Agent 目前存在一个已知问题：`pre_llm_call` 钩子不会传递 `chat_id` 参数给插件（尽管 Hermes 内部拥有该信息）。这导致插件无法自动确定目标会话。
+插件通过多级来源自动确定目标会话：
 
-**临时解决方案**：
-- 在 `.env` 中设置 `HERMES_FEISHU_CHAT_ID`，插件会在找不到 chat_id 时使用该默认值
-- 适用于单会话场景（例如只在特定群组中使用）
-- 多会话场景下，建议向 Hermes 提交 Issue 请求修复
+1. 工具调用时显式传递的 `chat_id` 参数
+2. Hermes 会话上下文（gateway 自动注入）
+3. `HERMES_FEISHU_CHAT_ID` 环境变量（回退默认值）
+
+多会话场景下，gateway 会自动传递当前聊天会话的 `chat_id` 给插件，通常无需手动配置。
+
+**如需要手动指定**：
+
+```bash
+# 编辑 Hermes 环境变量文件
+nano ~/.hermes/.env
+
+# 添加以下内容
+HERMES_FEISHU_CHAT_ID=oc_xxxxxxxxxxxxxxxxxxxxxxxx
+```
 
 **如何获取 chat_id**：
 1. 在飞书中发送消息给机器人
