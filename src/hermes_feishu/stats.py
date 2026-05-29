@@ -1,29 +1,22 @@
-"""API call stats — stored via os.environ to survive process boundaries.
+"""API call stats — module-level variables for in-process sharing.
 
-Hermes gateway may run the agent conversation loop and plugin tools in
-separate processes (subprocess). Module-level variables are NOT shared.
-os.environ propagates to child processes via fork/exec, so using it as
-the transport ensures stats survive process boundaries.
+post_api_request and transform_llm_output run in the same Hermes agent
+session process, so a module-level dict is all we need.  No os.environ
+trickery required.
 
-The post_api_request hook writes stats to env vars.
-The tool handler reads them and builds the footer.
+The previous os.environ-based approach was conceptually wrong:
+os.environ is per-process and is NEVER a cross-process transport on
+any OS (Linux, macOS, or Windows).
 """
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-# Env var keys
-_ENV_MODEL = "_HERMES_FOOTER_MODEL"
-_ENV_PROVIDER = "_HERMES_FOOTER_PROVIDER"
-_ENV_PROMPT = "_HERMES_FOOTER_PROMPT_TOKENS"
-_ENV_COMPLETION = "_HERMES_FOOTER_COMPLETION_TOKENS"
-_ENV_TOTAL = "_HERMES_FOOTER_TOTAL_TOKENS"
-_ENV_DURATION = "_HERMES_FOOTER_API_DURATION"
-_ENV_TIMESTAMP = "_HERMES_FOOTER_UPDATED_AT"
+# Module-level state — shared by reference within the same process.
+_stats: Dict[str, Any] = {}
 
 
 def update(
@@ -33,7 +26,7 @@ def update(
     api_duration: float = 0.0,
     base_url: str = "",
 ) -> None:
-    """Store latest API call metadata in os.environ (cross-process safe).
+    """Store latest API call metadata in module-level dict.
 
     Args:
         model: Model name (e.g. "deepseek-v4-flash").
@@ -42,6 +35,7 @@ def update(
         api_duration: API call duration in seconds.
         base_url: API base URL (optional).
     """
+    global _stats
     prompt = 0
     completion = 0
     total = 0
@@ -54,35 +48,32 @@ def update(
         completion = getattr(usage, "output_tokens", getattr(usage, "completion_tokens", 0)) or 0
         total = getattr(usage, "total_tokens", 0) or (prompt + completion)
 
-    os.environ[_ENV_MODEL] = model or ""
-    os.environ[_ENV_PROVIDER] = provider or ""
-    os.environ[_ENV_PROMPT] = str(prompt)
-    os.environ[_ENV_COMPLETION] = str(completion)
-    os.environ[_ENV_TOTAL] = str(total)
-    os.environ[_ENV_DURATION] = f"{api_duration:.2f}"
-    os.environ[_ENV_TIMESTAMP] = str(time.time())
+    _stats = {
+        "model": model or "",
+        "provider": provider or "",
+        "prompt": prompt,
+        "completion": completion,
+        "total": total,
+        "duration": api_duration,
+        "updated_at": time.time(),
+    }
 
 
 def build_footer() -> str:
-    """Build a markdown footer line from env-var-passed API stats.
+    """Build a markdown footer line from module-level API stats.
 
     Returns:
         "🤖 opencode-go/deepseek-v4-flash  |  💬 135,583↑ 992↓  |  ⏱ 10.8s  |  🕐 14:30:25"
     """
-    model = os.environ.get(_ENV_MODEL, "")
-    provider = os.environ.get(_ENV_PROVIDER, "")
+    global _stats
+    model = _stats.get("model", "")
+    provider = _stats.get("provider", "")
+    prompt = _stats.get("prompt", 0)
+    completion = _stats.get("completion", 0)
+    total = _stats.get("total", 0)
+    duration = _stats.get("duration", 0.0)
 
-    prompt_s = os.environ.get(_ENV_PROMPT, "0")
-    completion_s = os.environ.get(_ENV_COMPLETION, "0")
-    total_s = os.environ.get(_ENV_TOTAL, "0")
-    duration_s = os.environ.get(_ENV_DURATION, "0")
-
-    prompt = int(prompt_s) if prompt_s.isdigit() else 0
-    completion = int(completion_s) if completion_s.isdigit() else 0
-    total = int(total_s) if total_s.isdigit() else 0
-    duration = float(duration_s) if duration_s else 0.0
-
-    parts = []  # Will hold sub-parts for line 2 (tokens + duration)
+    parts: list[str] = []
 
     # Line 1: Model badge
     label = ""
