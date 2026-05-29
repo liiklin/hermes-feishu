@@ -230,6 +230,15 @@ MIT License
 
 ## 更新日志
 
+### v0.6.1 (2026-05-29)
+
+**Bug 修复**
+- 🐛 修复 footer 不显示：`stats` 模块移除 `os.environ` 跨进程传输，改用模块级变量。`os.environ` 在任何 OS 上都是进程私有，子进程修改不传回父进程，导致 `transform_llm_output` 读不到 `post_api_request` 写入的 API 统计。
+
+**改进**
+- 🔧 `plugin.yaml` 统一版本号，清除残留 `pre_llm_call` 引用
+- 📝 README 更新"解决方案"章节，匹配实际使用的 `post_api_request` + `transform_llm_output` + gateway 自动卡片包装架构
+
 ### v0.6.0 (2026-05-29)
 
 **新功能**
