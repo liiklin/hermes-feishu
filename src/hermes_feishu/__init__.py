@@ -142,11 +142,14 @@ async def handle(event_type: str, context: object = None) -> None:
     if event_type != "gateway:startup":
         return
 
-    # Ensure plugin source is on sys.path (gateway process doesn\'t load plugins)
+    # Try profile path first, fallback to global
     hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
-    plugin_src = os.path.join(hermes_home, "plugins", "hermes-feishu", "src")
-    if plugin_src not in sys.path:
-        sys.path.insert(0, plugin_src)
+    global_home = os.path.expanduser("~/.hermes")
+
+    for base in (hermes_home, global_home):
+        plugin_src = os.path.join(base, "plugins", "hermes-feishu", "src")
+        if os.path.isdir(plugin_src) and plugin_src not in sys.path:
+            sys.path.insert(0, plugin_src)
 
     from hermes_feishu.card_patcher import patch_gateway
 
