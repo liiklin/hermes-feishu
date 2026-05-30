@@ -173,6 +173,13 @@ def send_feishu_card(args: dict, **kwargs) -> str:
         flags=re.MULTILINE,
     ).strip()
 
+    # Inline code — Feishu card markdown doesn't support backtick `` `code` ``
+    content = re.sub(
+        r"`([^`]+)`",
+        lambda m: f"**`{m.group(1)}`**",
+        content,
+    )
+
     # Check for tables in content
     from .table_parser import parse_table, contains_table
 

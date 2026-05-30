@@ -201,6 +201,14 @@ def _build_card_payload(self: object, content: str) -> tuple:
     # 3. Strip blockquotes — Feishu card markdown doesn't support >
     main_content = _strip_blockquotes(main_content)
 
+    # 3b. Inline code — Feishu card markdown doesn't support backtick `` `code` ``
+    # Convert to bold backtick form: `` `code` `` → **`code`**
+    main_content = re.sub(
+        r"`([^`]+)`",
+        lambda m: f"**`{m.group(1)}`**",
+        main_content,
+    )
+
     # 4. Build card (table-aware when possible)
     card = _build_card_via_plugin(main_content, title=title)
     if card is None:

@@ -230,9 +230,10 @@ MIT License
 
 ## 更新日志
 
-### v0.6.1 (2026-05-29)
+### v0.6.1 (2026-05-30)
 
 **Bug 修复**
+- 🐛 修复内联代码 `` `code` `` 在飞书卡片中不渲染：飞书卡片 markdown 不支持反引号内联代码，自动转为 `**`code`**`（加粗 + 保留反引号示意见代码）
 - 🐛 修复 footer 不显示：`stats` 模块移除 `os.environ` 跨进程传输，改用模块级变量。`os.environ` 在任何 OS 上都是进程私有，子进程修改不传回父进程，导致 `transform_llm_output` 读不到 `post_api_request` 写入的 API 统计。
 
 **改进**
