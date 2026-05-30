@@ -174,11 +174,17 @@ def send_feishu_card(args: dict, **kwargs) -> str:
     ).strip()
 
     # Inline code — Feishu card markdown doesn't support backtick `` `code` ``
-    content = re.sub(
-        r"`([^`]+)`",
-        lambda m: f"**`{m.group(1)}`**",
-        content,
-    )
+    # Placeholder approach: extract ``` code blocks, convert inline code
+    # in remaining text, then restore code blocks.
+    _code_blocks = []
+    def _save_cb(m):
+        _code_blocks.append(m.group(0))
+        return f"\0CB{len(_code_blocks)-1}\0"
+    content = re.sub(r"```.*?```", _save_cb, content, flags=re.DOTALL)
+    # Card markdown doesn't render backticks, so strip them: `code` → **code**
+    content = re.sub(r"`([^`]+)`", lambda m: f"**{m.group(1)}**", content)
+    for i, block in enumerate(_code_blocks):
+        content = content.replace(f"\0CB{i}\0", block)
 
     # Check for tables in content
     from .table_parser import parse_table, contains_table

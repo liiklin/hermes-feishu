@@ -202,12 +202,20 @@ def _build_card_payload(self: object, content: str) -> tuple:
     main_content = _strip_blockquotes(main_content)
 
     # 3b. Inline code — Feishu card markdown doesn't support backtick `` `code` ``
-    # Convert to bold backtick form: `` `code` `` → **`code`**
-    main_content = re.sub(
-        r"`([^`]+)`",
-        lambda m: f"**`{m.group(1)}`**",
-        main_content,
-    )
+    # Use placeholder approach: extract ``` code blocks, convert inline code
+    # in remaining text, then restore code blocks.
+    # This avoids regex ambiguity between ``` and ` in complex texts.
+    _code_blocks = []
+    def _save_cb(m):
+        _code_blocks.append(m.group(0))
+        return f"\0CB{len(_code_blocks)-1}\0"
+    main_content = re.sub(r"```.*?```", _save_cb, main_content, flags=re.DOTALL)
+    # Now convert inline code in non-code-block text
+    # Card markdown doesn't render backticks, so strip them: `code` → **code**
+    main_content = re.sub(r"`([^`]+)`", lambda m: f"**{m.group(1)}**", main_content)
+    # Restore code blocks
+    for i, block in enumerate(_code_blocks):
+        main_content = main_content.replace(f"\0CB{i}\0", block)
 
     # 4. Build card (table-aware when possible)
     card = _build_card_via_plugin(main_content, title=title)
